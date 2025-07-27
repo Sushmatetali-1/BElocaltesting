@@ -1,0 +1,8 @@
+Flask==2.3.3
+Flask-CORS==4.0.0
+SQLAlchemy==2.0.29
+mysql-connector-python==8.1.0
+python-dotenv==1.0.0
+Werkzeug==2.3.7
+gunicorn==21.2.0
+alembic==1.12.1
