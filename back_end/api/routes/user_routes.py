@@ -60,14 +60,15 @@ def decode_jwt_token(token):
         return None  # Invalid token
 
 def get_user_permissions(user_id):
-    """Get user permissions based on user_access and role_types"""
+    """Get simplified user permissions - Admin gets all access, others get limited access"""
     query = """
     SELECT DISTINCT
         ua.app_id,
         ca.title as app_title,
         ut.user_type,
         ut.description as user_type_desc,
-        c.name as customer_name
+        c.name as customer_name,
+        u.user_type_id
     FROM user_access ua
     JOIN customer_apps ca ON ua.app_id = ca.app_id
     JOIN user u ON ua.user_id = u.user_id
@@ -78,9 +79,35 @@ def get_user_permissions(user_id):
     
     try:
         permissions = execute_query(query, {"user_id": user_id}, fetch_all=True)
-        return [dict(perm._mapping) for perm in permissions] if permissions else []
+        if not permissions:
+            return []
+        
+        perm_data = [dict(perm._mapping) for perm in permissions]
+        
+        # Simplify permissions based on user type
+        for perm in perm_data:
+            if perm['user_type_id'] == 1:  # Admin
+                perm['access_level'] = 'admin'
+                perm['allowed_operations'] = ['create', 'read', 'update', 'delete', 'list', 'search', 'manage']
+                perm['user_type_desc'] = 'Administrator with full access to all operations'
+            else:  # All other user types become regular users
+                perm['access_level'] = 'user'
+                perm['allowed_operations'] = ['list', 'search']
+                perm['user_type'] = 'User'
+                perm['user_type_desc'] = 'Standard user with search and list access only'
+        
+        return perm_data
     except Exception:
         return []
+
+def is_admin(user_id):
+    """Check if user has admin privileges (user_type_id = 1)"""
+    try:
+        query = "SELECT user_type_id FROM user WHERE user_id = :user_id"
+        result = execute_query(query, {"user_id": user_id}, fetch_one=True)
+        return result and dict(result._mapping).get('user_type_id') == 1
+    except Exception:
+        return False
 
 def check_rate_limit(client_ip):
     """Simple rate limiting check"""
@@ -126,25 +153,31 @@ def check_authentication():
         abort(401)  # Unauthorized
 
 def check_admin_permission():
-    """Check if user has admin permissions"""
+    """Check if user has admin permissions - simplified to only allow Admin (user_type_id = 1)"""
     if not hasattr(request, 'current_user'):
         abort(401)  # Unauthorized
     
-    # Get user type
-    user_type_query = "SELECT user_type FROM user_type WHERE user_type_id = :user_type_id"
-    try:
-        user_type = execute_query(user_type_query, {"user_type_id": request.current_user['user_type_id']}, fetch_one=True)
-        if not user_type:
-            abort(403)  # Forbidden
-        
-        user_type_name = dict(user_type._mapping)['user_type'].lower()
-        
-        # Only Admin and Manager types can perform admin actions
-        if user_type_name not in ['admin', 'manager']:
-            abort(403)  # Forbidden
-            
-    except Exception:
-        abort(403)  # Forbidden
+    # Only users with user_type_id = 1 (Admin) are allowed
+    if not is_admin(request.current_user['user_id']):
+        abort(403)  # Forbidden - Only Admin users allowed
+
+def check_user_permission(operation):
+    """Check if user has permission for specific operation"""
+    if not hasattr(request, 'current_user'):
+        abort(401)  # Unauthorized
+    
+    user_id = request.current_user['user_id']
+    
+    # Admin users have access to all operations
+    if is_admin(user_id):
+        return True
+    
+    # Regular users only have access to list and search operations
+    allowed_operations = ['list', 'search']
+    if operation not in allowed_operations:
+        abort(403)  # Forbidden - Operation not allowed for regular users
+    
+    return True
 
 def check_app_access(app_id):
     """Check if user has access to specific app"""
@@ -434,6 +467,9 @@ def list_users():
     # Check authentication
     check_authentication()
     
+    # Check user permissions (both admin and regular users can list)
+    check_user_permission('list')
+    
     try:
         rows = execute_query(USER_QUERIES["list_base"], fetch_all=True)
         users_data = [dict(row._mapping) for row in rows]
@@ -443,9 +479,46 @@ def list_users():
         abort(500)  # Internal Server Error
 
 
+# ---------- Search Users ----------
+@user_bp.route("/search", methods=["GET"])
+def search_users():
+    # Apply rate limiting
+    check_rate_limit(request.remote_addr)
+    
+    # Check authentication
+    check_authentication()
+    
+    # Check user permissions (both admin and regular users can search)
+    check_user_permission('search')
+    
+    # Get search query parameter
+    search_query = request.args.get('q', '').strip()
+    if not search_query:
+        abort(400)  # Bad Request - Search query required
+    
+    try:
+        # Add wildcards for partial matching
+        search_param = f"%{search_query}%"
+        rows = execute_query(USER_QUERIES["search"], {"query": search_param}, fetch_all=True)
+        users_data = [dict(row._mapping) for row in rows]
+        return create_response("success", f"Search results for '{search_query}'", users_data, 200)
+    except Exception as e:
+        print(f"Database error: {e}")
+        abort(500)  # Internal Server Error
+
+
 # ---------- Update User ----------
 @user_bp.route("/update/<int:user_id>", methods=["PUT", "PATCH"])
 def update_user(user_id):
+    # Apply rate limiting
+    check_rate_limit(request.remote_addr)
+    
+    # Check authentication
+    check_authentication()
+    
+    # Check admin permissions (only admins can update users)
+    check_admin_permission()
+    
     # Validate Content-Type
     if not request.is_json:
         abort(415)  # Unsupported Media Type
@@ -576,6 +649,9 @@ def get_user_by_id(user_id):
     
     # Check authentication
     check_authentication()
+    
+    # Check admin permissions (only admins can view individual user details)
+    check_admin_permission()
     
     try:
         row = execute_query(USER_QUERIES["get_by_id"], {"user_id": user_id}, fetch_one=True)

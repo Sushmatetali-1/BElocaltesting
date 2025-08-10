@@ -59,14 +59,15 @@ def decode_jwt_token(token):
         return None  # Invalid token
 
 def get_user_permissions(user_id):
-    """Get user permissions based on user_access and role_types"""
+    """Get simplified user permissions - Admin gets all access, others get limited access"""
     query = """
     SELECT DISTINCT
         ua.app_id,
         ca.title as app_title,
         ut.user_type,
         ut.description as user_type_desc,
-        c.name as customer_name
+        c.name as customer_name,
+        u.user_type_id
     FROM user_access ua
     JOIN customer_apps ca ON ua.app_id = ca.app_id
     JOIN user u ON ua.user_id = u.user_id
@@ -77,7 +78,24 @@ def get_user_permissions(user_id):
     
     try:
         permissions = execute_query(query, {"user_id": user_id}, fetch_all=True)
-        return [dict(perm._mapping) for perm in permissions] if permissions else []
+        if not permissions:
+            return []
+        
+        perm_data = [dict(perm._mapping) for perm in permissions]
+        
+        # Simplify permissions based on user type
+        for perm in perm_data:
+            if perm['user_type_id'] == 1:  # Admin
+                perm['access_level'] = 'admin'
+                perm['allowed_operations'] = ['create', 'read', 'update', 'delete', 'list', 'search', 'manage']
+                perm['user_type_desc'] = 'Administrator with full access to all operations'
+            else:  # All other user types become regular users
+                perm['access_level'] = 'user'
+                perm['allowed_operations'] = ['list', 'search']
+                perm['user_type'] = 'User'
+                perm['user_type_desc'] = 'Standard user with search and list access only'
+        
+        return perm_data
     except Exception:
         return []
 

@@ -15,33 +15,17 @@ VALUES
 (1009, 'Hooli',             '1 Silicon Valley Rd, Palo Alto',   '+1-555-0109'),
 (1010, 'Cyberdyne Systems', '2029 Skynet Ave, Los Angeles',     '+1-555-0110');
 
--- 2. Insert user_type
+-- 2. Insert user_type (Simplified to 2 types only)
 INSERT INTO user_type (user_type_id, user_type, description)
 VALUES
-(1, 'Admin',         'Administrator access to all modules'),
-(2, 'Manager',       'Manages department resources and tasks'),
-(3, 'Support',       'Provides customer and tech support'),
-(4, 'Developer',     'Handles code and technical issues'),
-(5, 'Analyst',       'Performs data analysis and reports'),
-(6, 'Sales',         'Handles client sales and onboarding'),
-(7, 'Finance',       'Manages billing and invoices'),
-(8, 'HR',            'Human Resources activities'),
-(9, 'Legal',         'Legal and compliance matters'),
-(10, 'Guest',        'Limited guest access');
+(1, 'Admin',         'Administrator with full system privileges - can create, update, delete users'),
+(2, 'Regular User',  'Regular user with limited privileges - can only list and search users');
 
--- 3. Insert role_types
+-- 3. Insert role_types (Simplified to match 2-tier user system)
 INSERT INTO role_types (role_id, role_name, description)
 VALUES
-(1, 'SuperAdmin', 'All privileges'),
-(2, 'OrgAdmin',   'Organization administration'),
-(3, 'AppManager','Manages apps'),
-(4, 'DeptManager','Manages department'),
-(5, 'User',       'Standard end user'),
-(6, 'ReadOnly',   'Can only read data'),
-(7, 'Auditor',    'Audit access'),
-(8, 'External',   'External collaborator'),
-(9, 'Bot',        'Automated user/bot'),
-(10, 'Test',      'Used for testing');
+(1, 'Admin', 'Full system privileges - can create, update, delete users'),
+(2, 'User',  'Limited privileges - can only list and search users');
 
 -- 4. Insert customer_apps
 INSERT INTO customer_apps (app_id, customer_id, title, description)
@@ -58,18 +42,22 @@ VALUES
 (510, 1010, 'Cyberdyne AI',      'AI management for Cyberdyne');
 
 -- 5. Insert users (passwords are hashed with SHA256 - password is 'password123' for all)
+-- Updated to use only 2 user types: Admin (1) and Regular User (2)
 INSERT INTO user (user_id, user_type_id, customer_id, email, password_hash, username, department, name, contact_info)
 VALUES
+-- Admin users (user_type_id = 1)
 (2001, 1, 1001, 'admin1@acme.com',      'ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f', 'acmeadmin',   'IT',        'Alice Admin',    '555-111-1001'),
-(2002, 2, 1002, 'manager1@globex.com',  'ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f', 'globexmgr',   'Sales',     'Bob Manager',    '555-111-1002'),
-(2003, 3, 1003, 'support1@initech.com', 'ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f', 'initechsup',  'Support',   'Charlie Support','555-111-1003'),
-(2004, 4, 1004, 'dev1@umbrella.com',    'ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f', 'umbrelladev', 'DevOps',    'Dana Dev',       '555-111-1004'),
-(2005, 5, 1005, 'analyst@vandelay.com', 'ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f', 'vandelyana',  'Analytics', 'Eve Analyst',    '555-111-1005'),
-(2006, 6, 1006, 'sales@wonka.com',      'ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f', 'wonkasales',  'Sales',     'Frank Sales',    '555-111-1006'),
-(2007, 7, 1007, 'finance@stark.com',    'ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f', 'starkfin',    'Finance',   'Grace Finance',  '555-111-1007'),
-(2008, 8, 1008, 'hr@wayne.com',         'ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f', 'waynehr',     'HR',        'Hank HR',        '555-111-1008'),
-(2009, 9, 1009, 'legal@hooli.com',      'ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f', 'hooglegal',   'Legal',     'Ivy Legal',      '555-111-1009'),
-(2010, 10, 1010, 'guest1@cyberdyne.com','ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f', 'cyberguest',  'Visitors',  'Jack Guest',     '555-111-1010');
+(2002, 1, 1007, 'admin2@stark.com',     'ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f', 'starkadmin',  'IT',        'Tony Admin',     '555-111-1007'),
+
+-- Regular users (user_type_id = 2) 
+(2003, 2, 1002, 'manager1@globex.com',  'ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f', 'globexmgr',   'Sales',     'Bob Manager',    '555-111-1002'),
+(2004, 2, 1003, 'support1@initech.com', 'ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f', 'initechsup',  'Support',   'Charlie Support','555-111-1003'),
+(2005, 2, 1004, 'user1@umbrella.com',   'ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f', 'umbrellauser','Research',  'Dana User',      '555-111-1004'),
+(2006, 2, 1005, 'analyst@vandelay.com', 'ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f', 'vandelyana',  'Analytics', 'Eve Analyst',    '555-111-1005'),
+(2007, 2, 1006, 'user2@wonka.com',      'ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f', 'wonkauser',   'Production','Frank User',     '555-111-1006'),
+(2008, 2, 1008, 'user3@wayne.com',      'ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f', 'wayneuser',   'Security',  'Bruce User',     '555-111-1008'),
+(2009, 2, 1009, 'user4@hooli.com',      'ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f', 'hooliuser',   'Engineering','Dinesh User',    '555-111-1009'),
+(2010, 2, 1010, 'user5@cyberdyne.com',  'ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f', 'cyberuser',   'AI Research','Sarah User',     '555-111-1010');
 
 -- 6. Insert user_access
 INSERT INTO user_access (user_id, app_id, customer_id)

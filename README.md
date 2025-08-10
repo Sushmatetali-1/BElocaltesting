@@ -1,24 +1,42 @@
 ### Software - python,pycharm,mysql workbench,postman - download and setup in system for development and testing
 
+### User Types (Simplified to 2 types only):
+
+1. **Admin (user_type_id = 1)**: Full system privileges
+   - Can create, update, delete users
+   - Can list and search users
+   - Login/logout access
+2. **Regular User (user_type_id = 2)**: Limited privileges
+   - Can ONLY list and search users
+   - Login/logout access
+   - Cannot create, update, or delete users
+
 ### Expected API structure-
 
-db/v1/api/user/create
+**Admin Only Endpoints:**
 
-db/v1/api/user/update
+- db/v1/api/user/create
+- db/v1/api/user/update
+- db/v1/api/user/delete
 
-db/v1/api/user/delete
+**Available to All Authenticated Users:**
 
-db/v1/api/user/search
+- db/v1/api/user/list
+- db/v1/api/user/search
 
-db/v1/api/user/list
+**Authentication Endpoints (Available to All):**
+
+- db/v1/api/auth/login
+- db/v1/api/auth/logout
+- db/v1/api/auth/validate
 
 ### API testing links -
 
-return codes  add – standard api codes  - create a module to read the code and display in api along with output
+return codes add – standard api codes - create a module to read the code and display in api along with output
 
 http://127.0.0.1:5000/db/v1/api/user/list - give data of all users
 
-http://127.0.0.1:5000/db/v1/api/user/40011  - current, updated info the department from HR to IT - instead of user_id we need to use(email/user_name/name) - this input field needs to be changed.
+http://127.0.0.1:5000/db/v1/api/user/40011 - current, updated info the department from HR to IT - instead of user_id we need to use(email/user_name/name) - this input field needs to be changed.
 
 http://127.0.0.1:5000/db/v1/api/user/40010 - deleted the user from DB so we will get error message - - instead of user_id we need to use(email/user_name/name) - this input field needs to be changed.
 
@@ -33,97 +51,102 @@ http://127.0.0.1:5000/db/v1/api/user/create – pending. - db/v1/api/user/create
 http://127.0.0.1:5000/db/v1/api/user/update/40011 – check – pending – retrieve the only updated data? -- instead of user_id we need to use(email/user_name/name) - this field needs to be changed.
 
 ### Pending works for user module API -
-1. add return codes 400,500,400 etc in api data return
-2. API- create,search
-3. instead of user_id , we need to use some columns like email/user_name/name for testing - as id,passwords and other stuff are handlled in BE DB level and are not visible at user leve
-4. Admin, user level testing like changing ourself as admin and check how data appers at api level, similarly making ourself as user and check how can we test in api level.
-   
 
-### Table structure - 
+1. add return codes 400,500,404 etc in api data return ✓
+2. API- create,search ✓
+3. instead of user_id , we need to use some columns like email/user_name/name for testing - as id,passwords and other stuff are handled in BE DB level and are not visible at user level
+4. **User Permission Testing:**
+   - **Admin Testing**: Login as 'acmeadmin' to test full privileges (create, update, delete, list, search)
+   - **Regular User Testing**: Login as 'test' or 'globexmgr' to test limited privileges (list, search only)
+   - Verify that regular users get 403 Forbidden when trying to access admin endpoints
+
+### Test Users for Permission Testing:
+
+- **acmeadmin** (Admin): Full access to all endpoints
+- **test** (Regular User): Limited to list/search only
+- **globexmgr** (Regular User): Limited to list/search only
+
+### Table structure -
 
 you may need to add few rows of data for testing purpose.
 
 CREATE TABLE customer (
- id INT AUTO_INCREMENT PRIMARY KEY,
- customer_id INT NOT NULL,
- name VARCHAR(255) NOT NULL,
- address VARCHAR(500),
- phone VARCHAR(50),
- created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
- updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+id INT AUTO_INCREMENT PRIMARY KEY,
+customer_id INT NOT NULL,
+name VARCHAR(255) NOT NULL,
+address VARCHAR(500),
+phone VARCHAR(50),
+created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 UNIQUE (customer_id)
 );
 
 CREATE TABLE `user` (
- id INT AUTO_INCREMENT PRIMARY KEY,
- user_id INT NOT NULL,
- user_type_id INT NOT NULL,
- customer_id INT NOT NULL,
- email VARCHAR(255) NOT NULL,
- password_hash VARCHAR(255) NOT NULL,
- username VARCHAR(100) NOT NULL,
- department VARCHAR(100),
- name VARCHAR(255) NOT NULL,
- contact_info VARCHAR(500),
- created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
- updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
- is_active BOOLEAN DEFAULT TRUE,
- FOREIGN KEY (customer_id) REFERENCES customer(customer_id),
- UNIQUE (user_id)
+id INT AUTO_INCREMENT PRIMARY KEY,
+user_id INT NOT NULL,
+user_type_id INT NOT NULL,
+customer_id INT NOT NULL,
+email VARCHAR(255) NOT NULL,
+password_hash VARCHAR(255) NOT NULL,
+username VARCHAR(100) NOT NULL,
+department VARCHAR(100),
+name VARCHAR(255) NOT NULL,
+contact_info VARCHAR(500),
+created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+is_active BOOLEAN DEFAULT TRUE,
+FOREIGN KEY (customer_id) REFERENCES customer(customer_id),
+UNIQUE (user_id)
 );
 
 CREATE TABLE user_type (
- id INT AUTO_INCREMENT PRIMARY KEY,
- user_type_id INT NOT NULL,
- user_type VARCHAR(50) NOT NULL,
- description TEXT,
- created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
- updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
- UNIQUE (user_type_id)
+id INT AUTO_INCREMENT PRIMARY KEY,
+user_type_id INT NOT NULL,
+user_type VARCHAR(50) NOT NULL,
+description TEXT,
+created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+UNIQUE (user_type_id)
 );
-
 
 CREATE TABLE user_access (
- id INT AUTO_INCREMENT PRIMARY KEY,
- user_id INT NOT NULL,
- app_id INT NOT NULL,
- customer_id INT NOT NULL,
- assigned_at DATETIME DEFAULT CURRENT_TIMESTAMP,
- FOREIGN KEY (user_id) REFERENCES user(user_id),
- FOREIGN KEY (customer_id) REFERENCES customer(customer_id)
+id INT AUTO_INCREMENT PRIMARY KEY,
+user_id INT NOT NULL,
+app_id INT NOT NULL,
+customer_id INT NOT NULL,
+assigned_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+FOREIGN KEY (user_id) REFERENCES user(user_id),
+FOREIGN KEY (customer_id) REFERENCES customer(customer_id)
 );
 
-CREATE TABLE  customer_apps (
- id INT AUTO_INCREMENT PRIMARY KEY,
- app_id INT NOT NULL,
- customer_id INT NOT NULL,
- title VARCHAR(255) NOT NULL,
- description TEXT,
- created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
- FOREIGN KEY (customer_id) REFERENCES customer(customer_id)
+CREATE TABLE customer_apps (
+id INT AUTO_INCREMENT PRIMARY KEY,
+app_id INT NOT NULL,
+customer_id INT NOT NULL,
+title VARCHAR(255) NOT NULL,
+description TEXT,
+created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+FOREIGN KEY (customer_id) REFERENCES customer(customer_id)
 );
 
 CREATE TABLE config (
- id INT AUTO_INCREMENT PRIMARY KEY,
- config_id INT NOT NULL,
- customer_id INT NOT NULL,
- app_id INT NOT NULL,
- item VARCHAR(100) NOT NULL,
- value TEXT,
+id INT AUTO_INCREMENT PRIMARY KEY,
+config_id INT NOT NULL,
+customer_id INT NOT NULL,
+app_id INT NOT NULL,
+item VARCHAR(100) NOT NULL,
+value TEXT,
 faq_questions VARCHAR(100) NOT NULL,
- created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
- updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
- FOREIGN KEY (customer_id) REFERENCES customer(customer_id)
+created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+FOREIGN KEY (customer_id) REFERENCES customer(customer_id)
 );
-
 
 CREATE TABLE role_types (
- id INT AUTO_INCREMENT PRIMARY KEY,
- role_id INT NOT NULL,
- role_name VARCHAR(50) NOT NULL,
- description TEXT,
- created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
- UNIQUE (role_id)
+id INT AUTO_INCREMENT PRIMARY KEY,
+role_id INT NOT NULL,
+role_name VARCHAR(50) NOT NULL,
+description TEXT,
+created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+UNIQUE (role_id)
 );
-
-
