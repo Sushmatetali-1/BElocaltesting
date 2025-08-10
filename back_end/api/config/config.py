@@ -11,7 +11,8 @@ import os
 # Database URL for SQLAlchemy
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "mysql+mysqlconnector://root:root@localhost:3306/ai_chatbot"
+    # "mysql+mysqlconnector://root:root@localhost:3306/ai_chatbot"
+    "mysql+mysqlconnector://root:@localhost:3306/ai_chatbot"
 )
 
 SECRET_KEY = 'dev-secret-key'

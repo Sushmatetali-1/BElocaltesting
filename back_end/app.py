@@ -7,6 +7,10 @@ Entry point for the Flask application.
 - Handles global error responses for 404, 405, and 500.
 """
 
+# Required to prevent writing .pyc files
+import sys
+sys.dont_write_bytecode = True
+
 from flask import Flask, jsonify
 from flask_cors import CORS
 
