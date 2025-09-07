@@ -1,721 +1,249 @@
-"""
-user_routes.py
----------------
-Handles all user-related API routes:
-- Create, list, update, delete, and fetch user by ID.
-- Validates input and returns consistent JSON responses.
-"""
-
-from flask import Blueprint, request, jsonify, abort
+from flask import Blueprint, request, jsonify, g
 from sqlalchemy import text
-from api.utils.db import execute_query
+from api.utils.db import get_engine
+from api.utils.auth_utils import require_auth, require_self_or_roles, hash_password
 from api.models.sql_queries import USER_QUERIES
-import time
-import jwt
-import hashlib
-from collections import defaultdict
-from datetime import datetime, timedelta
 
-user_bp = Blueprint('user', __name__)
+user_bp = Blueprint("user", __name__)
 
-# Configuration (move to config.py in production)
-JWT_SECRET_KEY = "your-secret-key-here"  # Change this in production
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRATION_HOURS = 24
+# ---------------------------
+# Helpers / validation
+# ---------------------------
+def _only_allowed_fields(payload, allowed):
+    return {k: v for k, v in payload.items() if k in allowed and v is not None}
 
-# Simple rate limiting storage (in production, use Redis or proper storage)
-request_counts = defaultdict(list)
-RATE_LIMIT = 10  # requests per minute
-RATE_WINDOW = 60  # seconds
+def _build_update_sql_and_params(base_sql, fields: dict, email: str):
+    parts = []
+    params = {}
+    for k, v in fields.items():
+        parts.append(f"{k} = :{k}")
+        params[k] = v
+    if not parts:
+        return None, None
+    sql = base_sql.format(fields=", ".join(parts))
+    params["email"] = email
+    return sql, params
 
-def hash_password(password):
-    """Hash password using SHA256 (use bcrypt in production)"""
-    return hashlib.sha256(password.encode()).hexdigest()
-
-def verify_password(password, hashed):
-    """Verify password against hash"""
-    return hash_password(password) == hashed
-
-def generate_jwt_token(user_data):
-    """Generate JWT token for authenticated user"""
-    payload = {
-        'user_id': user_data['user_id'],
-        'username': user_data['username'],
-        'email': user_data['email'],
-        'user_type_id': user_data['user_type_id'],
-        'customer_id': user_data['customer_id'],
-        'exp': datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS),
-        'iat': datetime.utcnow()
-    }
-    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
-
-def decode_jwt_token(token):
-    """Decode and validate JWT token"""
-    try:
-        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
-        return payload
-    except jwt.ExpiredSignatureError:
-        return None  # Token expired
-    except jwt.InvalidTokenError:
-        return None  # Invalid token
-
-def get_user_permissions(user_id):
-    """Get simplified user permissions - Admin gets all access, others get limited access"""
-    query = """
-    SELECT DISTINCT
-        ua.app_id,
-        ca.title as app_title,
-        ut.user_type,
-        ut.description as user_type_desc,
-        c.name as customer_name,
-        u.user_type_id
-    FROM user_access ua
-    JOIN customer_apps ca ON ua.app_id = ca.app_id
-    JOIN user u ON ua.user_id = u.user_id
-    JOIN user_type ut ON u.user_type_id = ut.user_type_id
-    JOIN customer c ON ua.customer_id = c.customer_id
-    WHERE ua.user_id = :user_id
-    """
-    
-    try:
-        permissions = execute_query(query, {"user_id": user_id}, fetch_all=True)
-        if not permissions:
-            return []
-        
-        perm_data = [dict(perm._mapping) for perm in permissions]
-        
-        # Simplify permissions based on user type
-        for perm in perm_data:
-            if perm['user_type_id'] == 1:  # Admin
-                perm['access_level'] = 'admin'
-                perm['allowed_operations'] = ['create', 'read', 'update', 'delete', 'list', 'search', 'manage']
-                perm['user_type_desc'] = 'Administrator with full access to all operations'
-            else:  # All other user types become regular users
-                perm['access_level'] = 'user'
-                perm['allowed_operations'] = ['list', 'search']
-                perm['user_type'] = 'User'
-                perm['user_type_desc'] = 'Standard user with search and list access only'
-        
-        return perm_data
-    except Exception:
-        return []
-
-def is_admin(user_id):
-    """Check if user has admin privileges (user_type_id = 1)"""
-    try:
-        query = "SELECT user_type_id FROM user WHERE user_id = :user_id"
-        result = execute_query(query, {"user_id": user_id}, fetch_one=True)
-        return result and dict(result._mapping).get('user_type_id') == 1
-    except Exception:
-        return False
-
-def check_rate_limit(client_ip):
-    """Simple rate limiting check"""
-    now = time.time()
-    # Clean old requests
-    request_counts[client_ip] = [req_time for req_time in request_counts[client_ip] 
-                                if now - req_time < RATE_WINDOW]
-    
-    if len(request_counts[client_ip]) >= RATE_LIMIT:
-        abort(429)  # Too Many Requests
-    
-    request_counts[client_ip].append(now)
-
-def check_authentication():
-    """Enhanced authentication check using JWT and database verification"""
-    auth_header = request.headers.get('Authorization')
-    if not auth_header:
-        abort(401)  # Unauthorized
-    
-    # Check Bearer token format
-    if not auth_header.startswith('Bearer '):
-        abort(401)  # Unauthorized
-    
-    token = auth_header.split(' ')[1]
-    
-    # Decode JWT token
-    payload = decode_jwt_token(token)
-    if not payload:
-        abort(401)  # Unauthorized - Invalid or expired token
-    
-    # Verify user still exists and is active
-    user_query = "SELECT user_id, username, email, user_type_id, customer_id FROM user WHERE user_id = :user_id"
-    try:
-        user = execute_query(user_query, {"user_id": payload['user_id']}, fetch_one=True)
-        if not user:
-            abort(401)  # Unauthorized - User not found
-        
-        # Store user info in request context for later use
-        request.current_user = dict(user._mapping)
-        return True
-        
-    except Exception:
-        abort(401)  # Unauthorized
-
-def check_admin_permission():
-    """Check if user has admin permissions - simplified to only allow Admin (user_type_id = 1)"""
-    if not hasattr(request, 'current_user'):
-        abort(401)  # Unauthorized
-    
-    # Only users with user_type_id = 1 (Admin) are allowed
-    if not is_admin(request.current_user['user_id']):
-        abort(403)  # Forbidden - Only Admin users allowed
-
-def check_user_permission(operation):
-    """Check if user has permission for specific operation"""
-    if not hasattr(request, 'current_user'):
-        abort(401)  # Unauthorized
-    
-    user_id = request.current_user['user_id']
-    
-    # Admin users have access to all operations
-    if is_admin(user_id):
-        return True
-    
-    # Regular users only have access to list and search operations
-    allowed_operations = ['list', 'search']
-    if operation not in allowed_operations:
-        abort(403)  # Forbidden - Operation not allowed for regular users
-    
-    return True
-
-def check_app_access(app_id):
-    """Check if user has access to specific app"""
-    if not hasattr(request, 'current_user'):
-        abort(401)  # Unauthorized
-    
-    access_query = """
-    SELECT ua.user_id 
-    FROM user_access ua 
-    WHERE ua.user_id = :user_id AND ua.app_id = :app_id
-    """
-    
-    try:
-        access = execute_query(access_query, {
-            "user_id": request.current_user['user_id'],
-            "app_id": app_id
-        }, fetch_one=True)
-        
-        if not access:
-            abort(403)  # Forbidden - No access to this app
-            
-    except Exception:
-        abort(403)  # Forbidden
-
-def check_customer_access(customer_id):
-    """Check if user belongs to the specified customer"""
-    if not hasattr(request, 'current_user'):
-        abort(401)  # Unauthorized
-    
-    if request.current_user['customer_id'] != customer_id:
-        abort(403)  # Forbidden - Different customer
-
-def create_response(status, message, data=None, code=200):
-    response = {"status": status, "message": message}
-    if data is not None:
-        response["data"] = data
-    return jsonify(response), code
-
-
-# ---------- Authentication Endpoints ----------
-
-@user_bp.route("/login", methods=["POST"])
-def login():
-    """User login endpoint"""
-    # Apply rate limiting
-    check_rate_limit(request.remote_addr)
-    
-    # Check Content-Type
-    if not request.is_json:
-        abort(415)  # Unsupported Media Type
-    
-    try:
-        data = request.get_json()
-    except Exception:
-        abort(400)  # Bad Request - Invalid JSON
-    
-    if not data or not data.get('username') or not data.get('password'):
-        abort(422)  # Unprocessable Entity - Missing credentials
-    
-    username = data['username']
-    password = data['password']
-    
-    try:
-        # Find user by username or email
-        user_query = """
-        SELECT u.user_id, u.username, u.email, u.password_hash, u.user_type_id, 
-               u.customer_id, u.name, ut.user_type, c.name as customer_name
-        FROM user u
-        JOIN user_type ut ON u.user_type_id = ut.user_type_id
-        JOIN customer c ON u.customer_id = c.customer_id
-        WHERE u.username = :username OR u.email = :username
-        """
-        
-        user = execute_query(user_query, {"username": username}, fetch_one=True)
-        
-        if not user:
-            abort(401)  # Unauthorized - User not found
-        
-        user_data = dict(user._mapping)
-        
-        # Verify password (in production, use bcrypt)
-        if not verify_password(password, user_data['password_hash']):
-            abort(401)  # Unauthorized - Wrong password
-        
-        # Generate JWT token
-        token = generate_jwt_token(user_data)
-        
-        # Get user permissions
-        permissions = get_user_permissions(user_data['user_id'])
-        
-        response_data = {
-            "token": token,
-            "user": {
-                "user_id": user_data['user_id'],
-                "username": user_data['username'],
-                "email": user_data['email'],
-                "name": user_data['name'],
-                "user_type": user_data['user_type'],
-                "customer_name": user_data['customer_name']
-            },
-            "permissions": permissions,
-            "expires_in": JWT_EXPIRATION_HOURS * 3600  # seconds
-        }
-        
-        return create_response("success", "Login successful", response_data, 200)
-        
-    except Exception as e:
-        print(f"Login error: {e}")
-        abort(500)  # Internal Server Error
-
-
-@user_bp.route("/logout", methods=["POST"])
-def logout():
-    """User logout endpoint"""
-    # Check authentication
-    check_authentication()
-    
-    # In a real implementation, you might:
-    # 1. Blacklist the JWT token
-    # 2. Clear server-side session
-    # 3. Log the logout event
-    
-    return create_response("success", "Logout successful", {}, 200)
-
-
-@user_bp.route("/profile", methods=["GET"])
-def get_profile():
-    """Get current user profile"""
-    # Apply rate limiting
-    check_rate_limit(request.remote_addr)
-    
-    # Check authentication
-    check_authentication()
-    
-    try:
-        user_id = request.current_user['user_id']
-        
-        # Get detailed user info
-        user_query = """
-        SELECT u.user_id, u.username, u.email, u.name, u.department, u.contact_info,
-               u.created_at, u.updated_at, ut.user_type, ut.description as user_type_desc,
-               c.name as customer_name, c.address, c.phone
-        FROM user u
-        JOIN user_type ut ON u.user_type_id = ut.user_type_id
-        JOIN customer c ON u.customer_id = c.customer_id
-        WHERE u.user_id = :user_id
-        """
-        
-        user = execute_query(user_query, {"user_id": user_id}, fetch_one=True)
-        
-        if not user:
-            abort(404)  # Not Found
-        
-        user_data = dict(user._mapping)
-        
-        # Get user permissions
-        permissions = get_user_permissions(user_id)
-        
-        response_data = {
-            "user": user_data,
-            "permissions": permissions
-        }
-        
-        return create_response("success", "Profile retrieved", response_data, 200)
-        
-    except Exception as e:
-        print(f"Profile error: {e}")
-        abort(500)  # Internal Server Error
-
-
-@user_bp.route("/permissions", methods=["GET"])
-def get_user_permissions_endpoint():
-    """Get current user's permissions"""
-    # Check authentication
-    check_authentication()
-    
-    try:
-        user_id = request.current_user['user_id']
-        permissions = get_user_permissions(user_id)
-        
-        return create_response("success", "Permissions retrieved", {"permissions": permissions}, 200)
-        
-    except Exception as e:
-        print(f"Permissions error: {e}")
-        abort(500)  # Internal Server Error
-
-
-# ---------- Create User ----------
+# ---------------------------
+# CREATE
+# ---------------------------
 @user_bp.route("/create", methods=["POST"])
+@require_auth(roles=["admin", "config"])
 def create_user():
-    # Apply rate limiting
-    check_rate_limit(request.remote_addr)
-    
-    # Check authentication (only authenticated users can create users)
-    check_authentication()
-    
-    # Check admin permissions (only admins/managers can create users)
-    check_admin_permission()
-    
-    # Check Content-Type for POST requests
+    """
+    Required fields:
+      user_id, user_type_id, customer_id, email, username, name, password
+    Optional:
+      department, contact_info
+    """
     if not request.is_json:
-        abort(415)  # Unsupported Media Type
-    
-    try:
-        data = request.get_json(force=True)
-    except Exception:
-        abort(400)  # Bad Request - Invalid JSON
-    
-    if not data:
-        abort(400)  # Bad Request - No data provided
+        return jsonify({"status": "error", "message": "Unsupported media type - use application/json"}), 415
 
-    required_fields = ["user_id", "user_type_id", "customer_id", "email", "username", "name", "password"]
-    missing_fields = [field for field in required_fields if field not in data]
-    
-    if missing_fields:
-        abort(422)  # Unprocessable Entity - Missing required fields
-    
-    # Basic validation
-    if not data.get("email") or "@" not in data["email"]:
-        abort(422)  # Unprocessable Entity - Invalid email format
-    
-    if not data.get("username") or len(data["username"]) < 3:
-        abort(422)  # Unprocessable Entity - Invalid username
-    
-    if not data.get("password") or len(data["password"]) < 6:
-        abort(422)  # Unprocessable Entity - Password too short
+    body = request.get_json(silent=True) or {}
+    required = ["user_id", "user_type_id", "customer_id", "email", "username", "name", "password"]
+    missing = [f for f in required if not body.get(f)]
+    if missing:
+        return jsonify({"status": "error", "message": f"Missing required: {', '.join(missing)}"}), 422
 
-    # Check if creating user for same customer (unless super admin)
-    current_user_type_query = "SELECT user_type FROM user_type WHERE user_type_id = :user_type_id"
-    user_type = execute_query(current_user_type_query, {"user_type_id": request.current_user['user_type_id']}, fetch_one=True)
-    
-    if user_type and dict(user_type._mapping)['user_type'].lower() != 'admin':
-        # Non-admin users can only create users for their own customer
-        check_customer_access(data["customer_id"])
+    # Enforce same customer scope
+    creator_cid = int(g.user["customer_id"])
+    target_cid = int(body["customer_id"])
+    if creator_cid != target_cid:
+        return jsonify({"status": "error", "message": "Forbidden - cross-customer create not allowed"}), 403
 
-    params = {
-        "user_id": data["user_id"],
-        "user_type_id": data["user_type_id"],
-        "customer_id": data["customer_id"],
-        "email": data["email"],
-        "password_hash": hash_password(data["password"]),  # Hash the password
-        "username": data["username"],
-        "department": data.get("department"),
-        "name": data["name"],
-        "contact_info": data.get("contact_info")
-    }
+    email = body["email"].strip().lower()
+    username = body["username"].strip()
+    password_hash = hash_password(body["password"])
 
-    try:
-        # Check if user already exists
-        existing_user = execute_query(USER_QUERIES["get_by_id"], {"user_id": data["user_id"]}, fetch_one=True)
-        if existing_user:
-            abort(409)  # Conflict - User already exists
-        
-        # Check if email/username already exists
-        email_check = execute_query("SELECT user_id FROM user WHERE email = :email", {"email": data["email"]}, fetch_one=True)
-        if email_check:
-            abort(409)  # Conflict - Email already exists
-            
-        username_check = execute_query("SELECT user_id FROM user WHERE username = :username", {"username": data["username"]}, fetch_one=True)
-        if username_check:
-            abort(409)  # Conflict - Username already exists
-        
-        execute_query(USER_QUERIES["create"], params)
-        created_row = execute_query(USER_QUERIES["get_by_id"], {"user_id": data["user_id"]}, fetch_one=True)
-        
-        if not created_row:
-            abort(500)  # Internal Server Error - Creation failed
-        
-        # Don't return password hash in response
-        user_data = dict(created_row._mapping)
-        user_data.pop('password_hash', None)
-            
-        return create_response("success", "User created", user_data, 201)  # 201 Created
-        
-    except Exception as e:
-        # Log the error (in production, use proper logging)
-        print(f"Database error: {e}")
-        abort(500)  # Internal Server Error
+    with get_engine().begin() as conn:
+        # unique checks
+        exists_email = conn.execute(text(USER_QUERIES["email_exists"]), {"email": email}).first()
+        if exists_email:
+            return jsonify({"status": "error", "message": "Email already exists"}), 409
 
+        exists_username = conn.execute(text(USER_QUERIES["username_exists"]), {"username": username}).first()
+        if exists_username:
+            return jsonify({"status": "error", "message": "Username already exists"}), 409
 
-# ---------- List Users ----------
+        # user_type must exist
+        ut_exists = conn.execute(text(USER_QUERIES["user_type_exists"]), {"user_type_id": int(body["user_type_id"])}).first()
+        if not ut_exists:
+            return jsonify({"status": "error", "message": "user_type_id does not exist"}), 422
+
+        conn.execute(
+            text(USER_QUERIES["create_user"]),
+            {
+                "user_id": int(body["user_id"]),
+                "user_type_id": int(body["user_type_id"]),
+                "customer_id": target_cid,
+                "email": email,
+                "password_hash": password_hash,
+                "username": username,
+                "department": body.get("department"),
+                "name": body["name"],
+                "contact_info": body.get("contact_info"),
+            }
+        )
+
+    return jsonify({
+        "status": "success",
+        "message": "user created",
+        "data": {"email": email}
+    }), 201
+
+# ---------------------------
+# UPDATE
+# ---------------------------
+@user_bp.route("/update/<path:email>", methods=["PUT"])
+@require_self_or_roles("email", allowed_roles=["admin", "config"])
+def update_user(email):
+    """
+    Admin/Config can update any user fields except primary keys.
+    General users can update only themselves and only:
+        username, name, department, contact_info, password (hash), new_email
+    To change email, pass { "new_email": "..." }
+    """
+    if not request.is_json:
+        return jsonify({"status": "error", "message": "Unsupported media type - use application/json"}), 415
+
+    email = email.strip().lower()
+    body = request.get_json(silent=True) or {}
+
+    # Which fields are allowed?
+    role = g.user["role"]
+    allowed_fields_admin = {"username", "name", "department", "contact_info", "password_hash", "user_type_id", "customer_id"}
+    allowed_fields_general = {"username", "name", "department", "contact_info", "password_hash"}
+
+    fields = {}
+
+    # Convert plain password -> password_hash if provided
+    if body.get("password"):
+        fields["password_hash"] = hash_password(body["password"])
+
+    for key in ["username", "name", "department", "contact_info", "user_type_id", "customer_id"]:
+        if key in body:
+            fields[key] = body[key]
+
+    # Apply role-based filter
+    if role in ("admin", "config"):
+        fields = _only_allowed_fields(fields, allowed_fields_admin)
+    else:
+        # general user: must be self; decorator already allows self or admin/config
+        fields = _only_allowed_fields(fields, allowed_fields_general)
+
+    if not fields and not body.get("new_email"):
+        return jsonify({"status": "error", "message": "No updatable fields supplied"}), 422
+
+    with get_engine().begin() as conn:
+        # Scope to same customer for non-admin/config update to others (handled by decorator), but
+        # also protect cross-customer when admin/config explicitly set customer_id
+        if role in ("admin", "config"):
+            # enforce same customer by default
+            if "customer_id" in fields and int(fields["customer_id"]) != int(g.user["customer_id"]):
+                return jsonify({"status": "error", "message": "Cross-customer reassignment not allowed"}), 403
+
+        # do main update
+        if fields:
+            sql, params = _build_update_sql_and_params(USER_QUERIES["update_by_email_base"], fields, email)
+            if not sql:
+                return jsonify({"status": "error", "message": "No valid fields to update"}), 422
+            conn.execute(text(sql), params)
+
+        # email change (optional)
+        if body.get("new_email"):
+            new_email = body["new_email"].strip().lower()
+            # uniqueness
+            exists_email = conn.execute(text(USER_QUERIES["email_exists"]), {"email": new_email}).first()
+            if exists_email:
+                return jsonify({"status": "error", "message": "new_email already exists"}), 409
+            conn.execute(text(USER_QUERIES["update_by_email_base"].format(fields="email = :new_email")),
+                         {"new_email": new_email, "email": email})
+            email = new_email
+
+    return jsonify({"status": "success", "message": "user updated", "data": {"email": email}}), 200
+
+# ---------------------------
+# DELETE
+# ---------------------------
+@user_bp.route("/delete/<path:email>", methods=["DELETE"])
+@require_auth(roles=["admin", "config"])
+def delete_user(email):
+    """
+    DIRECT delete: remove the row from `user` by email, scoped to caller's customer.
+    TEMP: direct hard-delete only (removed soft-delete & ?hard). Delete this block when FE is wired.
+    """
+    email = (email or "").strip().lower()
+    if not email:
+        return jsonify({"status": "error", "message": "email required"}), 400
+
+    with get_engine().begin() as conn:
+        result = conn.execute(
+            text(USER_QUERIES["hard_delete_by_email_scoped"]),
+            {"email": email, "customer_id": int(g.user["customer_id"])}
+        )
+        # MySQL+SQLAlchemy returns the affected rows count here
+        if result.rowcount == 0:
+            return jsonify({"status": "error", "message": "Not found in your customer scope"}), 404
+
+    # 200 with echo, or 204 if you prefer no body
+    return jsonify({"status": "success", "message": "user deleted", "data": {"email": email}}), 200
+# ---------------------------
+# GET one
+# ---------------------------
+@user_bp.route("/<path:email>", methods=["GET"])
+@require_auth()  # any logged in user
+def get_user(email):
+    email = email.strip().lower()
+    with get_engine().begin() as conn:
+        row = conn.execute(text(USER_QUERIES["get_by_email_scoped"]),
+                           {"email": email, "customer_id": int(g.user["customer_id"])}).mappings().first()
+        if not row:
+            return jsonify({"status": "error", "message": "not found"}), 404
+
+        row = dict(row)
+        return jsonify({"status": "success", "data": row}), 200
+
+# ---------------------------
+# LIST
+# ---------------------------
 @user_bp.route("/list", methods=["GET"])
+@require_auth()  # all roles can list (scoped)
 def list_users():
-    # Apply rate limiting
-    check_rate_limit(request.remote_addr)
-    
-    # Check authentication
-    check_authentication()
-    
-    # Check user permissions (both admin and regular users can list)
-    check_user_permission('list')
-    
-    try:
-        rows = execute_query(USER_QUERIES["list_base"], fetch_all=True)
-        users_data = [dict(row._mapping) for row in rows]
-        return create_response("success", "User list retrieved", users_data, 200)  # 200 OK
-    except Exception as e:
-        print(f"Database error: {e}")
-        abort(500)  # Internal Server Error
+    with get_engine().begin() as conn:
+        data = conn.execute(text(USER_QUERIES["list_active_by_customer"]),
+                            {"customer_id": int(g.user["customer_id"])}).mappings().all()
+        return jsonify({"status": "success", "data": [dict(r) for r in data]}), 200
 
-
-# ---------- Search Users ----------
+# ---------------------------
+# SEARCH
+# ---------------------------
 @user_bp.route("/search", methods=["GET"])
+@require_auth()  # all roles can search (scoped)
 def search_users():
-    # Apply rate limiting
-    check_rate_limit(request.remote_addr)
-    
-    # Check authentication
-    check_authentication()
-    
-    # Check user permissions (both admin and regular users can search)
-    check_user_permission('search')
-    
-    # Get search query parameter
-    search_query = request.args.get('q', '').strip()
-    if not search_query:
-        abort(400)  # Bad Request - Search query required
-    
-    try:
-        # Add wildcards for partial matching
-        search_param = f"%{search_query}%"
-        rows = execute_query(USER_QUERIES["search"], {"query": search_param}, fetch_all=True)
-        users_data = [dict(row._mapping) for row in rows]
-        return create_response("success", f"Search results for '{search_query}'", users_data, 200)
-    except Exception as e:
-        print(f"Database error: {e}")
-        abort(500)  # Internal Server Error
+    q = (request.args.get("q") or "").strip()
+    if not q:
+        return jsonify({"status": "error", "message": "q is required"}), 400
 
+    like = f"%{q}%"
+    with get_engine().begin() as conn:
+        rows = conn.execute(
+            text(USER_QUERIES["search_by_customer"]),
+            {"query": like, "customer_id": int(g.user["customer_id"])}
+        ).mappings().all()
 
-# ---------- Update User ----------
-@user_bp.route("/update/<int:user_id>", methods=["PUT", "PATCH"])
-def update_user(user_id):
-    # Apply rate limiting
-    check_rate_limit(request.remote_addr)
-    
-    # Check authentication
-    check_authentication()
-    
-    # Check admin permissions (only admins can update users)
-    check_admin_permission()
-    
-    # Validate Content-Type
-    if not request.is_json:
-        abort(415)  # Unsupported Media Type
-    
-    try:
-        data = request.get_json()
-    except Exception:
-        abort(400)  # Bad Request - Invalid JSON
-    
-    if not data:
-        abort(400)  # Bad Request - No data provided
+    if not rows:
+        # Return a clear message when no rows were found
+        # (If you prefer 200 instead of 404, change the status code below to 200)
+        return jsonify({
+            "status": "error",
+            "message": f"No user found matching '{q}'. "
+                       "Check the email, username, or name and try again."
+        }), 404
 
-    try:
-        # Check if user exists
-        current_row = execute_query(USER_QUERIES["get_by_id"], {"user_id": user_id}, fetch_one=True)
-        if not current_row:
-            abort(404)  # Not Found
+    # Normal success case
+    return jsonify({
+        "status": "success",
+        "total": len(rows),
+        "data": [dict(r) for r in rows]
+    }), 200
 
-        current_data = dict(current_row._mapping)
-        
-        # Validate updateable fields
-        allowed_fields = ["email", "username", "department", "name", "contact_info"]
-        fields = []
-        params = {"user_id": user_id}
-        
-        for field in data:
-            if field not in allowed_fields:
-                abort(422)  # Unprocessable Entity - Invalid field
-            
-            # Basic validation for specific fields
-            if field == "email" and data[field] and "@" not in data[field]:
-                abort(422)  # Unprocessable Entity - Invalid email
-            
-            if field == "username" and data[field] and len(data[field]) < 3:
-                abort(422)  # Unprocessable Entity - Invalid username
-            
-            fields.append(f"{field} = :{field}")
-            params[field] = data[field]
-
-        if not fields:
-            abort(400)  # Bad Request - Nothing to update
-
-        query = text(USER_QUERIES["update_base"].format(fields=", ".join(fields)))
-        execute_query(query, params)
-
-        updated_row = execute_query(USER_QUERIES["get_by_id"], {"user_id": user_id}, fetch_one=True)
-        updated_data = dict(updated_row._mapping)
-
-        # Find changed columns and return only those
-        changes = {}
-        for key, old_value in current_data.items():
-            new_value = updated_data.get(key)
-            if old_value != new_value:
-                changes[key] = new_value
-
-        return create_response("success", "User updated successfully", changes, 200)  # 200 OK
-        
-    except Exception as e:
-        print(f"Database error: {e}")
-        abort(500)  # Internal Server Error
-
-
-# ---------- Get Update History ----------
-@user_bp.route("/update/<int:user_id>", methods=["GET"])
-def get_update_history(user_id):
-    try:
-        # Get the record
-        row = execute_query(USER_QUERIES["get_by_id"], {"user_id": user_id}, fetch_one=True)
-        if not row:
-            abort(404)  # Not Found
-
-        user_data = dict(row._mapping)
-
-        # Return only the columns that changed since last update
-        updated_columns = {}
-
-        # Only return the fields that can be updated by the user
-        for col in ["department", "name", "email", "username", "contact_info"]:
-            if user_data["updated_at"] != user_data["created_at"]:
-                updated_columns[col] = user_data[col]
-
-        # If no updated columns
-        if not updated_columns:
-            return create_response("success", "No recently updated columns", {}, 200)  # 200 OK
-
-        return create_response("success", "Recently updated column(s)", updated_columns, 200)  # 200 OK
-        
-    except Exception as e:
-        print(f"Database error: {e}")
-        abort(500)  # Internal Server Error
-
-# ---------- Delete User ----------
-@user_bp.route("/delete/<int:user_id>", methods=["DELETE"])
-def delete_user(user_id):
-    # Apply rate limiting
-    check_rate_limit(request.remote_addr)
-    
-    # Check authentication
-    check_authentication()
-    
-    # Check admin permissions (only admins can delete users)
-    check_admin_permission()
-    
-    try:
-        # Check if user exists first
-        existing_user = execute_query(USER_QUERIES["get_by_id"], {"user_id": user_id}, fetch_one=True)
-        if not existing_user:
-            abort(404)  # Not Found
-        
-        rows_deleted = execute_query(USER_QUERIES["delete"], {"user_id": user_id})
-        
-        if rows_deleted == 0:
-            abort(500)  # Internal Server Error - Delete failed
-        
-        # Return 204 No Content for successful deletion
-        return '', 204
-        
-    except Exception as e:
-        print(f"Database error: {e}")
-        abort(500)  # Internal Server Error
-
-
-# ---------- Get User by ID ----------
-@user_bp.route("/<int:user_id>", methods=["GET"])
-def get_user_by_id(user_id):
-    # Apply rate limiting
-    check_rate_limit(request.remote_addr)
-    
-    # Check authentication
-    check_authentication()
-    
-    # Check admin permissions (only admins can view individual user details)
-    check_admin_permission()
-    
-    try:
-        row = execute_query(USER_QUERIES["get_by_id"], {"user_id": user_id}, fetch_one=True)
-        if not row:
-            abort(404)  # Not Found
-
-        return create_response("success", "User data retrieved", dict(row._mapping), 200)  # 200 OK
-        
-    except Exception as e:
-        print(f"Database error: {e}")
-        abort(500)  # Internal Server Error
-
-
-# ---------- Health Check Endpoint ----------
-@user_bp.route("/health", methods=["GET"])
-def health_check():
-    """Health check endpoint that can demonstrate 502/503 errors"""
-    try:
-        # Try to connect to database
-        test_query = "SELECT 1"
-        execute_query(test_query, fetch_one=True)
-        
-        # Check if external services are available (simulated)
-        external_service_status = check_external_services()
-        
-        if not external_service_status:
-            abort(502)  # Bad Gateway - External service unavailable
-        
-        return create_response("success", "Service is healthy", {"status": "healthy"}, 200)
-        
-    except Exception as e:
-        print(f"Health check failed: {e}")
-        # If database is down, return 503 Service Unavailable
-        abort(503)  # Service Unavailable
-
-
-def check_external_services():
-    """Simulate checking external services (email, payment gateway, etc.)"""
-    # In real implementation, this would check actual external services
-    # For demo purposes, return True
-    # You could simulate failures by returning False
-    return True
-
-
-# ---------- Admin Only Endpoint (Demonstrates 403) ----------
-@user_bp.route("/admin/stats", methods=["GET"])
-def get_admin_stats():
-    """Admin-only endpoint to demonstrate 403 Forbidden"""
-    # Check authentication first
-    check_authentication()
-    
-    # Check admin permissions
-    check_admin_permission()  # This will abort(403) if not admin
-    
-    try:
-        # Get user statistics (admin only)
-        total_users = execute_query("SELECT COUNT(*) as count FROM users", fetch_one=True)
-        stats = {
-            "total_users": dict(total_users._mapping)["count"] if total_users else 0,
-            "endpoint_access": "admin_only"
-        }
-        
-        return create_response("success", "Admin statistics", stats, 200)
-        
-    except Exception as e:
-        print(f"Database error: {e}")
-        abort(500)  # Internal Server Error
